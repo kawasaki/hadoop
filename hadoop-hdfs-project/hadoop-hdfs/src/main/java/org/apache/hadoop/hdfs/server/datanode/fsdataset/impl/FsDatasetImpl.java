@@ -2478,7 +2478,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
         // Block is missing in memory - add the block to volumeMap
         ReplicaInfo diskBlockInfo = new ReplicaBuilder(ReplicaState.FINALIZED)
             .setBlockId(blockId)
-            .setLength(diskFile.length())
+            .setLength(fileIoProvider.length(diskFile))
             .setGenerationStamp(diskGS)
             .setFsVolume(vol)
             .setDirectoryToUse(diskFile.getParentFile())
@@ -2507,7 +2507,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
               ReplicaInfo diskBlockInfo =
                   new ReplicaBuilder(ReplicaState.FINALIZED)
                     .setBlockId(blockId)
-                    .setLength(diskFile.length())
+                    .setLength(fileIoProvider.length(diskFile))
                     .setGenerationStamp(diskGS)
                     .setFsVolume(vol)
                     .setDirectoryToUse(diskFile.getParentFile())
@@ -3032,8 +3032,10 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     try (AutoCloseableLock lock = datasetWriteLock.acquire()) {
       ramDiskReplicaTracker.recordEndLazyPersist(bpId, blockId, savedFiles);
 
-      targetVolume.incDfsUsedAndNumBlocks(bpId, savedFiles[0].length()
-          + savedFiles[1].length());
+      final FileIoProvider fileIoProvider = datanode.getFileIoProvider();
+      targetVolume.incDfsUsedAndNumBlocks(bpId,
+          fileIoProvider.length(savedFiles[0]) +
+          fileIoProvider.length(savedFiles[1]));
 
       // Update metrics (ignore the metadata file size)
       datanode.getMetrics().incrRamDiskBlocksLazyPersisted();

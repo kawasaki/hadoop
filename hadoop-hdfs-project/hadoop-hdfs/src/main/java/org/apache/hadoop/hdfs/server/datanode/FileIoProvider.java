@@ -79,8 +79,8 @@ public class FileIoProvider {
   public static final Logger LOG = LoggerFactory.getLogger(
       FileIoProvider.class);
 
-  private final ProfilingFileIoEvents profilingEventHook;
-  private final FaultInjectorFileIoEvents faultInjectorEventHook;
+  protected final ProfilingFileIoEvents profilingEventHook;
+  protected final FaultInjectorFileIoEvents faultInjectorEventHook;
   private final DataNode datanode;
 
   private static final int LEN_INT = 4;
@@ -180,7 +180,7 @@ public class FileIoProvider {
    * @param  volume target volume. null if unavailable.
    */
   public void syncFileRange(
-      @Nullable FsVolumeSpi volume, FileDescriptor outFd,
+    @Nullable FsVolumeSpi volume, FileOutputStream out, FileDescriptor outFd,
       long offset, long numBytes, int flags) throws NativeIOException {
     final long begin = profilingEventHook.beforeFileIo(volume, SYNC, 0);
     try {
@@ -270,10 +270,11 @@ public class FileIoProvider {
    */
   public void transferToSocketFully(
       @Nullable FsVolumeSpi volume, SocketOutputStream sockOut,
-      FileChannel fileCh, long position, int count,
+      FileInputStream fis, long position, int count,
       LongWritable waitTime, LongWritable transferTime) throws IOException {
     final long begin = profilingEventHook.beforeFileIo(volume, TRANSFER, count);
     try {
+      FileChannel fileCh = fis.getChannel();
       faultInjectorEventHook.beforeFileIo(volume, TRANSFER, count);
       sockOut.transferToFully(fileCh, position, count,
           waitTime, transferTime);
@@ -285,6 +286,16 @@ public class FileIoProvider {
       }
       throw e;
     }
+  }
+
+  /**
+   * Get position of given FileInputStream.
+   * @param fis  target FileInputStream.
+   * @return  Offset position of the next I/O operation from the start of fis.
+   * @throws IOException
+   */
+  public long getPosition(FileInputStream fis) throws IOException {
+    return fis.getChannel().position();
   }
 
   /**
@@ -607,6 +618,29 @@ public class FileIoProvider {
       onFailure(volume, begin);
       throw e;
     }
+  }
+
+  /**
+   * Truncate the file to the specified new length.
+   *
+   * @param volume  target volume. null if unavailable.
+   * @param f  target file to truncate
+   * @param newlen  the new length the target file to have
+   */
+  public void truncate(
+    @Nullable FsVolumeSpi volume, File f, long newlen) throws IOException {
+    try (RandomAccessFile blockRAF = getRandomAccessFile(volume, f, "rw")) {
+      blockRAF.setLength(newlen);
+    }
+  }
+
+  /**
+   * Return length of the specified file.
+   *
+   * @param f  target file to truncate
+   */
+  public long length(File f) {
+    return f.length();
   }
 
   /**
@@ -1059,7 +1093,7 @@ public class FileIoProvider {
     }
   }
 
-  private void onFailure(@Nullable FsVolumeSpi volume, long begin) {
+  protected void onFailure(@Nullable FsVolumeSpi volume, long begin) {
     if (datanode != null && volume != null) {
       datanode.checkDiskErrorAsync(volume);
     }

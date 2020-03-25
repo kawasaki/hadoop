@@ -302,7 +302,8 @@ public interface FsVolumeSpi
               getCondensedPath(new File(vol.getBaseURI()).getAbsolutePath());
       this.blockSuffix = blockFile == null ? null :
               getSuffix(blockFile, condensedVolPath);
-      this.blockLength = (blockFile != null) ? blockFile.length() : 0;
+      this.blockLength = (blockFile != null) ?
+        vol.getFileIoProvider().length(blockFile) : 0;
       if (metaFile == null) {
         this.metaSuffix = null;
       } else if (blockFile == null) {

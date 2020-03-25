@@ -289,7 +289,7 @@ public class LocalReplicaInPipeline extends LocalReplica
     final File metaFile = getMetaFile();
     if (DataNode.LOG.isDebugEnabled()) {
       DataNode.LOG.debug("writeTo blockfile is " + blockFile +
-                         " of size " + blockFile.length());
+                         " of size " + getFileIoProvider().length(blockFile));
       DataNode.LOG.debug("writeTo metafile is " + metaFile +
                          " of size " + metaFile.length());
     }
@@ -325,8 +325,11 @@ public class LocalReplicaInPipeline extends LocalReplica
         blockDiskSize = bytesOnDisk;
         crcDiskSize = BlockMetadataHeader.getHeaderSize() +
           (blockDiskSize+bytesPerChunk-1)/bytesPerChunk*checksumSize;
+        long blockFileLen = ZoneFs.isZoneFile(blockFile)
+          ? ZoneFs.getZoneFileLength(blockFile)
+          : blockFile.length();
         if (blockDiskSize > 0 &&
-            (blockDiskSize > blockFile.length() ||
+            (blockDiskSize > blockFileLen ||
                crcDiskSize>metaFile.length())) {
           throw new IOException("Corrupted block: " + this);
         }
@@ -346,11 +349,17 @@ public class LocalReplicaInPipeline extends LocalReplica
     FileOutputStream blockOut = null;
     FileOutputStream crcOut = null;
     try {
-      blockOut = fileIoProvider.getFileOutputStream(
+      if (ZoneFs.isZoneFile(blockFile)) {
+        blockOut = fileIoProvider.getFileOutputStream(getVolume(), blockFile);
+      } else {
+        blockOut = fileIoProvider.getFileOutputStream(
           getVolume(), new RandomAccessFile(blockFile, "rw").getFD());
+      }
       crcOut = fileIoProvider.getFileOutputStream(getVolume(), metaRAF.getFD());
       if (!isCreate) {
-        blockOut.getChannel().position(blockDiskSize);
+        if (!ZoneFs.isZoneFile(blockFile)) {
+          blockOut.getChannel().position(blockDiskSize);
+        }
         crcOut.getChannel().position(crcDiskSize);
       }
       return new ReplicaOutputStreams(blockOut, crcOut, checksum,

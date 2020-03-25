@@ -21,6 +21,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -199,10 +200,10 @@ abstract public class LocalReplica extends ReplicaInfo {
           IOUtils.copyBytes(in, out, 16 * 1024);
         }
       }
-      if (file.length() != tmpFile.length()) {
-        throw new IOException("Copy of file " + file + " size " + file.length()
-            + " into file " + tmpFile + " resulted in a size of "
-            + tmpFile.length());
+      if (fileIoProvider.length(file) != fileIoProvider.length(tmpFile)) {
+        throw new IOException("Copy of file " + file + " size "
+            + fileIoProvider.length(file) + " into file " + tmpFile
+            + " resulted in a size of " + fileIoProvider.length(tmpFile));
       }
       fileIoProvider.replaceFile(getVolume(), tmpFile, file);
     } catch (IOException e) {
@@ -279,7 +280,7 @@ abstract public class LocalReplica extends ReplicaInfo {
 
   @Override
   public long getBlockDataLength() {
-    return getBlockFile().length();
+    return getFileIoProvider().length(getBlockFile());
   }
 
   @Override
@@ -495,14 +496,17 @@ abstract public class LocalReplica extends ReplicaInfo {
     int lastchunksize = (int)(newlen - lastchunkoffset);
     byte[] b = new byte[Math.max(lastchunksize, checksumsize)];
 
-    try (RandomAccessFile blockRAF = fileIoProvider.getRandomAccessFile(
-        volume, blockFile, "rw")) {
-      //truncate blockFile
-      blockRAF.setLength(newlen);
-
+    fileIoProvider.truncate(volume, blockFile, newlen);
+    try (FileInputStream blockFis = fileIoProvider.getFileInputStream(
+           volume, blockFile)) {
       //read last chunk
-      blockRAF.seek(lastchunkoffset);
-      blockRAF.readFully(b, 0, lastchunksize);
+      long skipped = blockFis.skip(lastchunkoffset);
+      if (skipped != lastchunkoffset) {
+        throw new IOException("Unexpected skip position: " + blockFile);
+      }
+      try (DataInputStream blockDis = new DataInputStream(blockFis)) {
+        blockDis.readFully(b, 0, lastchunksize);
+      }
     }
 
     //compute checksum
