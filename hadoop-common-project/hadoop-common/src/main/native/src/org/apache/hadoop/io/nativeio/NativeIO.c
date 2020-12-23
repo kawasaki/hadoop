@@ -46,6 +46,12 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <dlfcn.h>
+#include <libaio.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#endif
 #include "config.h"
 #endif
 
@@ -164,6 +170,7 @@ static void consts_init(JNIEnv *env) {
   SET_INT_OR_RETURN(env, clazz, O_APPEND);
   SET_INT_OR_RETURN(env, clazz, O_NONBLOCK);
   SET_INT_OR_RETURN(env, clazz, O_SYNC);
+  SET_INT_OR_RETURN(env, clazz, O_DIRECT);
 #ifdef HAVE_POSIX_FADVISE
   setStaticBoolean(env, clazz, "fadvisePossible", JNI_TRUE);
   SET_INT_OR_RETURN(env, clazz, POSIX_FADV_NORMAL);
@@ -1646,6 +1653,301 @@ JNIEXPORT jstring JNICALL Java_org_apache_hadoop_io_nativeio_NativeIO_00024POSIX
     #endif
     return libpath;
   }
+
+/*
+ * Linux I/O typical max segment is 256. With the worst case,
+ * each segment only has on 4K page.
+ */
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 4096
+#endif
+
+int maxIOBytes;
+int queue_depth;
+
+io_context_t *aio_ctx_idp;
+void *libaio_dl_handle;
+
+struct async_write {
+	struct iocb cb;
+	void* aligned_buf;
+};
+
+struct async_write *async_writes;
+struct io_event *aio_events;
+int aw_inflight;
+
+/*
+ * Class:     org_apache_hadoop_io_nativeio_NativeIO
+ * Method:    appendWithAlignment
+ * Signature: (Ljava/io/FileDescriptor;[BII)V
+ * Note:      - requires thread guard
+ *            - requires len is equal to or smaller than maxBytesPerRequest
+ *              specifeid with to setupZoneFsAsyncIO()
+ *            - can be called parallel with getZoneFsAsyncIOEvents()
+ */
+JNIEXPORT void JNICALL
+Java_org_apache_hadoop_io_nativeio_NativeIO_appendWithAlignment
+(JNIEnv *env, jclass clazz, jshort wr_index, jobject fd_object, jlong fOff,
+ jbyteArray b, jint off, jint len)
+{
+#ifdef UNIX
+  int fd = fd_get(env, fd_object);
+  int ret, buflen;
+  jbyte* src;
+  struct async_write *wio;
+  struct iocb *cbp;
+
+  // Ensure that the given len is aligned to memory page size.
+  if (len % PAGE_SIZE) {
+    throw_ioe(env, EINVAL);
+    return;
+  }
+
+  if (aio_ctx_idp == NULL) {
+    throw_ioe(env, EINVAL);
+    return;
+  }
+
+  // Ensure that the length fits in the buffer size.
+  if (!maxIOBytes || len > maxIOBytes) {
+    throw_ioe(env, EINVAL);
+    return;
+  }
+
+  // Ensure that the wr_index fits in the allocated async_writes array.
+  if (!queue_depth || wr_index < 0 || wr_index >= queue_depth) {
+    throw_ioe(env, EINVAL);
+    return;
+  }
+
+  // Get iocb.
+  wio = &async_writes[wr_index];
+
+  buflen = maxIOBytes;
+  if (len < buflen)
+    buflen = len;
+
+  src = (*env)->GetByteArrayElements(env, b, NULL);
+
+  memcpy(wio->aligned_buf, src + off, len);
+
+  (*env)->ReleaseByteArrayElements(env, b, src, 0);
+
+  cbp = &wio->cb;
+  io_prep_pwrite(cbp, fd, wio->aligned_buf, len, fOff);
+  cbp->data = wio;
+  ret = io_submit(*aio_ctx_idp, 1, &cbp);
+  if (ret != 1) {
+    throw_ioe(env, ret);
+    return;
+  }
+  aw_inflight++;
+  return;
+#endif
+
+#ifdef WINDOWS
+  throw_ioe(env, 0);
+#endif
+}
+
+/*
+ * Class:     org_apache_hadoop_io_nativeio_NativeIO
+ * Method:    setupZoneFsAsyncIO
+ * Signature: (I)V
+ */
+JNIEXPORT void JNICALL
+Java_org_apache_hadoop_io_nativeio_NativeIO_setupZoneFsAsyncIO
+(JNIEnv *env, jclass clazz, jint maxBytesPerRequest, jint maxIO)
+{
+#ifdef __linux__
+  int ret, i;
+
+  if (aio_ctx_idp || async_writes || aio_events) {
+    throw_ioe(env, EINVAL);
+    return;
+  }
+
+  if (!maxBytesPerRequest || maxBytesPerRequest % PAGE_SIZE) {
+    throw_ioe(env, EINVAL);
+    return;
+  }
+  maxIOBytes = maxBytesPerRequest;
+
+  if (maxIO <= 0 || maxIO > 256) {
+    throw_ioe(env, EINVAL);
+    return;
+  }
+  queue_depth = maxIO;
+
+  aio_ctx_idp = malloc(sizeof(*aio_ctx_idp));
+  if (!aio_ctx_idp) {
+    throw_ioe(env, ENOMEM);
+    goto fail;
+  }
+  memset(aio_ctx_idp, 0, sizeof(*aio_ctx_idp));
+
+  async_writes = calloc(queue_depth, sizeof(*async_writes));
+  if (!async_writes) {
+    throw_ioe(env, ENOMEM);
+    goto fail;
+  }
+  aw_inflight = 0;
+  for (i = 0; i < queue_depth; i++) {
+    ret = posix_memalign(&async_writes[i].aligned_buf,
+			 PAGE_SIZE, maxIOBytes);
+    if (ret) {
+      throw_ioe(env, ret);
+      goto fail;
+    }
+  }
+
+  aio_events = malloc(sizeof(*aio_events) * queue_depth);
+  if (!aio_events) {
+    throw_ioe(env, ENOMEM);
+    goto fail;
+  }
+
+  ret = io_setup(queue_depth, aio_ctx_idp);
+  if (ret) {
+    throw_ioe(env, ret);
+    goto fail;
+  }
+
+  return;
+
+fail:
+  if (aio_events) {
+    free(aio_events);
+    aio_events = NULL;
+  }
+
+  if (async_writes) {
+    for (i = 0; i < queue_depth; i++) {
+      if (async_writes[i].aligned_buf)
+        free(async_writes[i].aligned_buf);
+    }
+    free(async_writes);
+    async_writes = NULL;
+  }
+
+  if (aio_ctx_idp) {
+    free(aio_ctx_idp);
+    aio_ctx_idp = NULL;
+  }
+
+#else /* __linux__ */
+  throw_ioe(env, 0);
+#endif
+}
+
+/*
+ * Class:     org_apache_hadoop_io_nativeio_NativeIO
+ * Method:    cleanupZoneFsAsyncIO
+ * Signature: ()V
+ */
+JNIEXPORT void JNICALL
+Java_org_apache_hadoop_io_nativeio_NativeIO_cleanupZoneFsAsyncIO
+(JNIEnv *env, jclass clazz)
+{
+#ifdef __linux__
+  int ret;
+
+  if (aio_ctx_idp == NULL) {
+    throw_ioe(env, EINVAL);
+    return;
+  }
+
+  ret = io_destroy(*aio_ctx_idp);
+  if (ret) {
+    throw_ioe(env, ret);
+  }
+
+  if (aio_ctx_idp) {
+    free(aio_ctx_idp);
+    aio_ctx_idp = NULL;
+  }
+
+  if (async_writes) {
+    free(async_writes);
+    async_writes = NULL;
+  }
+
+  if (aio_events) {
+    free(aio_events);
+    aio_events = NULL;
+  }
+
+#else /* __linux__ */
+  throw_ioe(env, 0);
+#endif
+}
+
+/*
+ * Class:     org_apache_hadoop_io_nativeio_NativeIO
+ * Method:    getZoneFsAsyncIOEvents
+ * Signature: ()I
+ * Note:      can be called parallel with appendWithAlignment()
+ */
+JNIEXPORT jint JNICALL
+Java_org_apache_hadoop_io_nativeio_NativeIO_getZoneFsAsyncIOEvents
+(JNIEnv *env, jclass clazz, jshortArray compWrites)
+{
+#ifdef __linux__
+  int ret, i, wr_index;
+  struct async_write *aw;
+  struct timespec timeout = {
+	  .tv_sec = 1,
+	  .tv_nsec = 0,
+  };
+  jshort *completedWrites;
+  jsize len;
+
+  if (!aio_ctx_idp || !async_writes || !aio_events) {
+    throw_ioe(env, EINVAL);
+    return -1;
+  }
+
+  len = (*env)->GetArrayLength(env, compWrites);
+  completedWrites = (*env)->GetShortArrayElements(env, compWrites, 0);
+
+  memset(aio_events, 0, sizeof(struct io_event) * queue_depth);
+  ret = io_getevents(*aio_ctx_idp, 1, queue_depth, aio_events, &timeout);
+  if (ret < 0) {
+    throw_ioe(env, ret);
+    goto out;
+  }
+
+  if (len < ret) {
+    throw_ioe(env, EINVAL);
+    goto out;
+  }
+
+  for (i = 0; i < ret && i < len; i++) {
+    aw_inflight--;
+    aw = (struct async_write *)aio_events[i].data;
+    if (&aw->cb != aio_events[i].obj) {
+      throw_ioe(env, EIO);
+      goto out;
+    }
+    wr_index = aw - async_writes;
+    if (wr_index < 0 || wr_index > queue_depth) {
+      throw_ioe(env, EIO);
+      goto out;
+    }
+
+    completedWrites[i] = wr_index;
+  }
+
+out:
+  (*env)->ReleaseShortArrayElements(env, compWrites, completedWrites, 0);
+
+  return (jint)ret;
+
+#else /* __linux__ */
+  throw_ioe(env, 0);
+#endif
+}
 
 #ifdef __cplusplus
 }

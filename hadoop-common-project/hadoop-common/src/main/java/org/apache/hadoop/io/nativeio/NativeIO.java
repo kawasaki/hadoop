@@ -22,6 +22,7 @@ import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.FileNotFoundException;
 import java.io.RandomAccessFile;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
@@ -69,6 +70,7 @@ public class NativeIO {
     public static int O_APPEND = -1;
     public static int O_NONBLOCK = -1;
     public static int O_SYNC = -1;
+    public static int O_DIRECT = -1;
 
     // Flags for posix_fadvise() from bits/fcntl.h - Set by JNI
     /* No further special treatment.  */
@@ -1132,4 +1134,44 @@ public class NativeIO {
 
   private static native void copyFileUnbuffered0(String src, String dst)
       throws NativeIOException;
+
+  /**
+   * Open the specified File for direct write, ensuring that it does exist.
+   * @param f the file that we want to open
+   *
+   * @throws IOException if any other error occurred
+   */
+  public static FileDescriptor openZoneFileToAppend(File f)
+      throws IOException {
+    int flags;
+
+    if (Shell.WINDOWS) {
+      throw new IOException("Not supported Windows Direct IO");
+    }
+    if (!f.exists()) {
+      throw new FileNotFoundException(f + " not found");
+    }
+    flags = NativeIO.POSIX.O_DIRECT | NativeIO.POSIX.O_WRONLY
+      /*| NativeIO.POSIX.O_APPEND*/;
+    return NativeIO.POSIX.open(f.toPath().toRealPath().toString(),flags, 0);
+  }
+
+  /**
+   * Do append write to the file descriptor using aligned memory buffer.
+   */
+  public static native void appendWithAlignment(short wrIndex,
+                                                FileDescriptor fd, long fOff,
+                                                byte b[], int off, int len)
+    throws IOException;
+
+  public static native void setupZoneFsAsyncIO(int maxBytesPerRequest,
+                                               int ioMax) throws IOException;
+  public static native void cleanupZoneFsAsyncIO() throws IOException;
+
+  /**
+   * This API will be brushed up.
+   * @return Number of events received
+   */
+  public static native int getZoneFsAsyncIOEvents(short completedWrites[])
+    throws IOException;
 }

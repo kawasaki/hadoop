@@ -295,7 +295,7 @@ if(NEED_LINK_DL)
    set(LIB_DL dl)
 endif()
 
-hadoop_target_link_dual_libraries(hadoop ${LIB_DL} ${JAVA_JVM_LIBRARY})
+hadoop_target_link_dual_libraries(hadoop ${LIB_DL} ${JAVA_JVM_LIBRARY} aio)
 set(LIBHADOOP_VERSION "1.0.0")
 set_target_properties(hadoop PROPERTIES SOVERSION ${LIBHADOOP_VERSION})
 hadoop_dual_output_directory(hadoop target/usr/local/lib)
