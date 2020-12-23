@@ -430,7 +430,8 @@ public class DataNode extends ReconfigurableBase
     this.tracer = createTracer(conf);
     this.tracerConfigurationManager =
         new TracerConfigurationManager(DATANODE_HTRACE_PREFIX, conf);
-    this.fileIoProvider = new FileIoProvider(conf, this);
+    this.fileIoProvider = ZoneFs.hasZoneFsConfig(conf)
+      ? new ZoneFsFileIoProvider(conf, this) : new FileIoProvider(conf, this);
     this.fileDescriptorPassingDisabledReason = null;
     this.maxNumberOfBlocksToLog = 0;
     this.confVersion = null;
@@ -459,7 +460,8 @@ public class DataNode extends ReconfigurableBase
     this.tracer = createTracer(conf);
     this.tracerConfigurationManager =
         new TracerConfigurationManager(DATANODE_HTRACE_PREFIX, conf);
-    this.fileIoProvider = new FileIoProvider(conf, this);
+    this.fileIoProvider = ZoneFs.hasZoneFsConfig(conf)
+      ? new ZoneFsFileIoProvider(conf, this) : new FileIoProvider(conf, this);
     this.blockScanner = new BlockScanner(this);
     this.lastDiskErrorCheck = 0;
     this.maxNumberOfBlocksToLog = conf.getLong(DFS_MAX_NUM_BLOCKS_TO_LOG_KEY,
@@ -2146,6 +2148,10 @@ public class DataNode extends ReconfigurableBase
     }
     if (metrics != null) {
       metrics.setDataNodeActiveXceiversCount(0);
+    }
+
+    if (this.fileIoProvider instanceof ZoneFsFileIoProvider) {
+      ZoneFsFileIoProvider.shutdown();
     }
 
    // IPC server needs to be shutdown late in the process, otherwise
